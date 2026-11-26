@@ -1,6 +1,9 @@
 package com.lighttowers.ble.ble
 
 import java.util.UUID
+import kotlin.math.ln
+import kotlin.math.pow
+import kotlin.math.roundToInt
 
 enum class RgbOrder(val label: String, val description: String) {
     RGB("RGB", "Standard (R -> G -> B)"),
@@ -64,8 +67,14 @@ object ElkBledomProtocol {
         }
     }
 
-    fun color(r: Int, g: Int, b: Int, order: RgbOrder): ByteArray {
-        val (c1, c2, c3) = order.remap(r, g, b)
+    /**
+     * Wysyła kolor RGB z opcją wzmocnienia jasności (Turbo Boost > 100%).
+     * Dla jasności 1..100% skaluje jasność sprzętową, a dla 101..150%
+     * maksymalizuje kanały RGB w kierunku bieli dla większej luminancji.
+     */
+    fun color(r: Int, g: Int, b: Int, order: RgbOrder, boostPercent: Int = 100): ByteArray {
+        val (br, bg, bb) = applyBrightnessBoost(r, g, b, boostPercent)
+        val (c1, c2, c3) = order.remap(br, bg, bb)
         return byteArrayOf(
             0x7E.toByte(), 0x00, 0x05, 0x03,
             c1.toByte(), c2.toByte(), c3.toByte(),
@@ -73,10 +82,47 @@ object ElkBledomProtocol {
         )
     }
 
+    fun applyBrightnessBoost(r: Int, g: Int, b: Int, brightnessPercent: Int): Triple<Int, Int, Int> {
+        val rr = r.coerceIn(0, 255)
+        val gg = g.coerceIn(0, 255)
+        val bb = b.coerceIn(0, 255)
+        if (brightnessPercent <= 100) {
+            return Triple(rr, gg, bb)
+        }
+        // Tryb Turbo (101% - 150%): podbicie składowych do maksymalnego wysterowania diod
+        val factor = ((brightnessPercent - 100) / 50f).coerceIn(0f, 1f)
+        val maxChannel = maxOf(rr, gg, bb)
+        if (maxChannel == 0) {
+            val whiteLift = (255 * factor).roundToInt()
+            return Triple(whiteLift, whiteLift, whiteLift)
+        }
+        // Najpierw normalizacja do pełnej mocy (255), potem domieszka białych subpikseli
+        val scale = 255f / maxChannel.toFloat()
+        val normR = (rr * scale).coerceAtMost(255f)
+        val normG = (gg * scale).coerceAtMost(255f)
+        val normB = (bb * scale).coerceAtMost(255f)
+
+        val whiteMix = factor * 0.45f
+        val outR = (normR + (255f - normR) * whiteMix).roundToInt().coerceIn(0, 255)
+        val outG = (normG + (255f - normG) * whiteMix).roundToInt().coerceIn(0, 255)
+        val outB = (normB + (255f - normB) * whiteMix).roundToInt().coerceIn(0, 255)
+        return Triple(outR, outG, outB)
+    }
+
+    /**
+     * Sterownik ELK-BLEDOM przyjmuje wartość 0x00..0x64 (0..100%)
+     * lub rozszerzone wartości 0x64..0xFF w niektórych rewizjach firmware.
+     */
     fun brightness(percent: Int): ByteArray {
-        val level = percent.coerceIn(0, 100).toByte()
+        val hwLevel = if (percent <= 100) {
+            percent.coerceIn(1, 100)
+        } else {
+            // Mapowanie 101..150% na 100..255 (0x64..0xFF) dla kontrolerów obsługujących pełny zakres bajtu
+            val extra = ((percent - 100) / 50f * 155f).roundToInt()
+            (100 + extra).coerceIn(100, 255)
+        }
         return byteArrayOf(
-            0x7E.toByte(), 0x00, 0x01, level,
+            0x7E.toByte(), 0x00, 0x01, hwLevel.toByte(),
             0x00, 0x00, 0x00, 0x00, 0xEF.toByte()
         )
     }
@@ -93,6 +139,30 @@ object ElkBledomProtocol {
         return byteArrayOf(
             0x7E.toByte(), 0x00, 0x02, speed,
             0x00, 0x00, 0x00, 0x00, 0xEF.toByte()
+        )
+    }
+
+    fun kelvinToRgb(kelvin: Int): Triple<Int, Int, Int> {
+        val temp = kelvin.coerceIn(2000, 9000) / 100.0
+        val r: Double = if (temp <= 66.0) {
+            255.0
+        } else {
+            329.698727446 * (temp - 60.0).pow(-0.1332047592)
+        }
+        val g: Double = if (temp <= 66.0) {
+            99.4708025861 * ln(temp) - 161.1195681661
+        } else {
+            288.1221695283 * (temp - 60.0).pow(-0.0755148492)
+        }
+        val b: Double = when {
+            temp >= 66.0 -> 255.0
+            temp <= 19.0 -> 0.0
+            else -> 138.5177312231 * ln(temp - 10.0) - 305.0447927307
+        }
+        return Triple(
+            r.roundToInt().coerceIn(0, 255),
+            g.roundToInt().coerceIn(0, 255),
+            b.roundToInt().coerceIn(0, 255)
         )
     }
 

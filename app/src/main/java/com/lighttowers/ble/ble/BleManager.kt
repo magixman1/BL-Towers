@@ -28,11 +28,26 @@ data class ScannedBarDevice(
     val isKnownLed: Boolean
 )
 
+data class SavedBarDevice(
+    val address: String,
+    val name: String,
+    val rgbOrder: RgbOrder,
+    val autoConnect: Boolean
+)
+
 data class ConnectedBarDevice(
     val address: String,
     val displayName: String,
     val isReady: Boolean,
     val rgbOrder: RgbOrder
+)
+
+data class CustomColorPreset(
+    val id: String,
+    val name: String,
+    val r: Int,
+    val g: Int,
+    val b: Int
 )
 
 class BleManager(private val context: Context) {
@@ -46,14 +61,23 @@ class BleManager(private val context: Context) {
     private val gattMap = ConcurrentHashMap<String, BluetoothGatt>()
     private val writeCharMap = ConcurrentHashMap<String, BluetoothGattCharacteristic>()
 
+    private val _isBluetoothEnabled = MutableStateFlow(adapter?.isEnabled == true)
+    val isBluetoothEnabled: StateFlow<Boolean> = _isBluetoothEnabled.asStateFlow()
+
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
     private val _scannedDevices = MutableStateFlow<List<ScannedBarDevice>>(emptyList())
     val scannedDevices: StateFlow<List<ScannedBarDevice>> = _scannedDevices.asStateFlow()
 
+    private val _savedDevices = MutableStateFlow<List<SavedBarDevice>>(emptyList())
+    val savedDevices: StateFlow<List<SavedBarDevice>> = _savedDevices.asStateFlow()
+
     private val _connectedDevices = MutableStateFlow<List<ConnectedBarDevice>>(emptyList())
     val connectedDevices: StateFlow<List<ConnectedBarDevice>> = _connectedDevices.asStateFlow()
+
+    private val _customPresets = MutableStateFlow<List<CustomColorPreset>>(emptyList())
+    val customPresets: StateFlow<List<CustomColorPreset>> = _customPresets.asStateFlow()
 
     private val _lastHexPacket = MutableStateFlow("Brak wysłanych ramek")
     val lastHexPacket: StateFlow<String> = _lastHexPacket.asStateFlow()
@@ -63,7 +87,63 @@ class BleManager(private val context: Context) {
 
     private var scanStopRunnable: Runnable? = null
 
-    fun isBluetoothEnabled(): Boolean = adapter?.isEnabled == true
+    init {
+        loadSavedDevices()
+        loadCustomPresets()
+        refreshBluetoothState()
+    }
+
+    fun refreshBluetoothState(): Boolean {
+        val enabled = adapter?.isEnabled == true
+        _isBluetoothEnabled.value = enabled
+        return enabled
+    }
+
+    // --- ZAPISYWANIE URZĄDZEŃ ---
+
+    private fun loadSavedDevices() {
+        val addresses = prefs.getStringSet("saved_addresses", emptySet()) ?: emptySet()
+        val list = addresses.map { addr ->
+            val name = prefs.getString("name_$addr", "Light Tower") ?: "Light Tower"
+            val orderName = prefs.getString("order_$addr", RgbOrder.RGB.name)
+            val order = RgbOrder.entries.firstOrNull { it.name == orderName } ?: RgbOrder.RGB
+            val auto = prefs.getBoolean("auto_$addr", true)
+            SavedBarDevice(address = addr, name = name, rgbOrder = order, autoConnect = auto)
+        }.sortedBy { it.name }
+        _savedDevices.value = list
+    }
+
+    fun saveDevice(address: String, name: String, autoConnect: Boolean = true) {
+        val current = (prefs.getStringSet("saved_addresses", emptySet()) ?: emptySet()).toMutableSet()
+        current.add(address)
+        val cleanName = name.trim().ifEmpty { "Light Tower" }
+        prefs.edit()
+            .putStringSet("saved_addresses", current)
+            .putString("name_$address", cleanName)
+            .putBoolean("auto_$address", autoConnect)
+            .apply()
+        loadSavedDevices()
+        _statusMessage.value = "Zapisano urządzenie: $cleanName"
+    }
+
+    fun removeSavedDevice(address: String) {
+        val current = (prefs.getStringSet("saved_addresses", emptySet()) ?: emptySet()).toMutableSet()
+        current.remove(address)
+        prefs.edit()
+            .putStringSet("saved_addresses", current)
+            .remove("auto_$address")
+            .apply()
+        loadSavedDevices()
+        _statusMessage.value = "Usunięto z zapisanych"
+    }
+
+    fun setAutoConnect(address: String, enabled: Boolean) {
+        prefs.edit().putBoolean("auto_$address", enabled).apply()
+        loadSavedDevices()
+    }
+
+    fun isDeviceSaved(address: String): Boolean =
+        _savedDevices.value.any { it.address == address }
 
     fun getSavedOrder(address: String): RgbOrder {
         val saved = prefs.getString("order_$address", RgbOrder.RGB.name)
@@ -75,13 +155,16 @@ class BleManager(private val context: Context) {
         _connectedDevices.update { list ->
             list.map { if (it.address == address) it.copy(rgbOrder = order) else it }
         }
+        loadSavedDevices()
     }
 
     fun setAllRgbOrder(order: RgbOrder) {
         val editor = prefs.edit()
         _connectedDevices.value.forEach { editor.putString("order_${it.address}", order.name) }
+        _savedDevices.value.forEach { editor.putString("order_${it.address}", order.name) }
         editor.apply()
         _connectedDevices.update { list -> list.map { it.copy(rgbOrder = order) } }
+        loadSavedDevices()
     }
 
     fun renameDevice(address: String, newName: String) {
@@ -90,10 +173,67 @@ class BleManager(private val context: Context) {
         _connectedDevices.update { list ->
             list.map { if (it.address == address) it.copy(displayName = clean) else it }
         }
+        _scannedDevices.update { list ->
+            list.map { if (it.address == address) it.copy(name = clean) else it }
+        }
+        loadSavedDevices()
     }
 
     private fun getSavedName(address: String, fallback: String): String {
         return prefs.getString("name_$address", null) ?: fallback
+    }
+
+    // --- WŁASNE ULUBIONE KOLORY ---
+
+    private fun loadCustomPresets() {
+        val raw = prefs.getString("custom_color_presets", "") ?: ""
+        if (raw.isBlank()) {
+            _customPresets.value = emptyList()
+            return
+        }
+        val parsed = raw.split(";").mapNotNull { entry ->
+            val parts = entry.split("|")
+            if (parts.size == 5) {
+                val r = parts[2].toIntOrNull() ?: return@mapNotNull null
+                val g = parts[3].toIntOrNull() ?: return@mapNotNull null
+                val b = parts[4].toIntOrNull() ?: return@mapNotNull null
+                CustomColorPreset(parts[0], parts[1], r, g, b)
+            } else null
+        }
+        _customPresets.value = parsed
+    }
+
+    fun addCustomPreset(name: String, r: Int, g: Int, b: Int) {
+        val cleanName = name.trim().replace("|", "").replace(";", "").ifEmpty { "Kolor" }
+        val id = System.currentTimeMillis().toString()
+        val updated = _customPresets.value + CustomColorPreset(id, cleanName, r, g, b)
+        saveCustomPresets(updated)
+    }
+
+    fun removeCustomPreset(id: String) {
+        val updated = _customPresets.value.filterNot { it.id == id }
+        saveCustomPresets(updated)
+    }
+
+    private fun saveCustomPresets(list: List<CustomColorPreset>) {
+        val serialized = list.joinToString(";") { "${it.id}|${it.name}|${it.r}|${it.g}|${it.b}" }
+        prefs.edit().putString("custom_color_presets", serialized).apply()
+        _customPresets.value = list
+    }
+
+    // --- SKANOWANIE I ŁĄCZENIE BLE ---
+
+    @SuppressLint("MissingPermission")
+    fun connectSavedAutoDevices() {
+        if (!refreshBluetoothState()) return
+        val toConnect = _savedDevices.value.filter { it.autoConnect }
+        if (toConnect.isEmpty()) return
+        _statusMessage.value = "Łączenie z zapisanymi barami (${toConnect.size})..."
+        toConnect.forEachIndexed { idx, dev ->
+            handler.postDelayed({
+                connect(dev.address, dev.name)
+            }, idx * 450L)
+        }
     }
 
     private val scanCallback = object : ScanCallback() {
@@ -108,7 +248,8 @@ class BleManager(private val context: Context) {
                 upper.contains("MELK") ||
                 upper.contains("LIGHT") ||
                 upper.contains("TOWER") ||
-                address.uppercase().startsWith("BE:16:46")
+                address.uppercase().startsWith("BE:16:46") ||
+                isDeviceSaved(address)
 
             val item = ScannedBarDevice(
                 address = address,
@@ -135,7 +276,7 @@ class BleManager(private val context: Context) {
     @SuppressLint("MissingPermission")
     fun startScan() {
         val scanner = adapter?.bluetoothLeScanner
-        if (scanner == null || !isBluetoothEnabled()) {
+        if (scanner == null || !refreshBluetoothState()) {
             _statusMessage.value = "Włącz Bluetooth w telefonie"
             return
         }
@@ -250,6 +391,10 @@ class BleManager(private val context: Context) {
                     _connectedDevices.update { list ->
                         list.map { if (it.address == address) it.copy(isReady = true) else it }
                     }
+                    // Automatyczne zapamiętanie urządzenia po pierwszym udanym połączeniu
+                    if (!isDeviceSaved(address)) {
+                        saveDevice(address, displayName, autoConnect = true)
+                    }
                     _statusMessage.value = "Gotowe do sterowania: $displayName"
                 } else {
                     _statusMessage.value = "Nie znaleziono charakterystyki zapisu (FFF3) w $displayName"
@@ -292,19 +437,26 @@ class BleManager(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    fun sendColor(targetAddress: String?, r: Int, g: Int, b: Int, fallbackOrder: RgbOrder) {
+    fun sendColor(
+        targetAddress: String?,
+        r: Int,
+        g: Int,
+        b: Int,
+        fallbackOrder: RgbOrder,
+        boostPercent: Int = 100
+    ) {
         val targets = if (targetAddress == null) {
             _connectedDevices.value
         } else {
             _connectedDevices.value.filter { it.address == targetAddress }
         }
         if (targets.isEmpty()) {
-            val preview = ElkBledomProtocol.color(r, g, b, fallbackOrder)
+            val preview = ElkBledomProtocol.color(r, g, b, fallbackOrder, boostPercent)
             _lastHexPacket.value = ElkBledomProtocol.toHexString(preview)
             return
         }
         for (dev in targets) {
-            val packet = ElkBledomProtocol.color(r, g, b, dev.rgbOrder)
+            val packet = ElkBledomProtocol.color(r, g, b, dev.rgbOrder, boostPercent)
             _lastHexPacket.value = ElkBledomProtocol.toHexString(packet)
             writeToDevice(dev.address, packet)
         }
