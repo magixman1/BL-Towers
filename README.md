@@ -1,11 +1,10 @@
-# Light Towers BLE (Android APK)
+# Light Towers BLE v3 (Android APK)
 
-Natywna aplikacja Android (Kotlin + Jetpack Compose) do sterowania dwoma świetlnymi barami Bluetooth LE opartymi o protokół **ELK-BLEDOM / Elkotrol** (np. `BE:16:46:...`), z wbudowaną zamianą kolejności kanałów RGB (`RGB`, `RBG`, `GRB`, `GBR`, `BRG`, `BGR`).
+Natywna aplikacja Android (Kotlin + Jetpack Compose) do sterowania świetlnymi barami Bluetooth LE (**ELK-BLEDOM / Elkotrol**).
 
-## Jak skompilować APK na GitHubie
-
-1. Utwórz nowe repozytorium na GitHubie (np. `LightTowersBLE`).
-2. Rozpakuj archiwum i wgraj wszystkie pliki (w tym ukryty folder `.github/workflows/build-apk.yml`) do głównego katalogu repozytorium.
-3. Wejdź w zakładkę **Actions** w repozytorium na GitHubie.
-4. Workflow **Build Android APK** uruchomi się automatycznie po `push` (możesz go też uruchomić ręcznie przyciskiem **Run workflow**).
-5. Po zakończeniu kompilacji (ok. 2–3 minuty) pobierz plik **`LightTowersBLE-debug-apk`** z sekcji **Artifacts** na dole strony buildu.
+## Nowe funkcje w v3
+- **Zapisywanie urządzeń i auto-łączenie:** automatyczne zapamiętywanie połączonych barów, nadawanie własnych nazw (np. *Bar Lewy*, *Bar Prawy*) oraz opcja automatycznego łączenia po uruchomieniu aplikacji.
+- **Systemowe uruchamianie Bluetooth i uprawnień:** okno żądania włączenia Bluetooth (`ACTION_REQUEST_ENABLE`) oraz uprawnień `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, `BLUETOOTH_ADVERTISE` i lokalizacji.
+- **Rozbudowana personalizacja kolorów:** płynne spektrum HSV + nasycenie, temperatura barwowa bieli w Kelwinach (`2000K–9000K`), suwaki RGB z wpisem HEX oraz zapisywanie własnych ulubionych kolorów.
+- **Zwiększony poziom jasności (1% – 150% Turbo Boost):** rozszerzony zakres sterowania jasnością wraz z przyciskami szybkiego wyboru (`25%`, `50%`, `100%`, `125% MAX`, `150% MAX`).
+- **Zamiana kanałów RGB:** 6 kombinacji (`RGB`, `RBG`, `GRB`, `GBR`, `BRG`, `BGR`) zapisywanych osobno dla każdego baru.
